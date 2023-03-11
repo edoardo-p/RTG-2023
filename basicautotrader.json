@@ -7,6 +7,6 @@
     "Type": "mmap",
     "Name": "info.dat"
   },
-  "TeamName": "Bollinger",
-  "Secret": "secret"
+  "TeamName": "Basic",
+  "Secret": "1234"
 }
