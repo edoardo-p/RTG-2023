@@ -19,8 +19,7 @@ import asyncio
 import itertools
 from typing import List
 
-import numpy as np
-import scipy
+import pandas as pd
 
 from ready_trader_go import (
     MAXIMUM_ASK,
@@ -58,11 +57,10 @@ class AutoTrader(BaseAutoTrader):
         self.asks = set()
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
 
-        self.moving_window = 20
-        self.etf_prices = []
-        self.future_prices = []
-        self.current_etf = 0
-        self.current_future = 0
+        self.df_etf = pd.DataFrame(columns=["bid", "ask"])
+
+        self.long_position_opened = False
+        self.short_position_opened = False
 
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
@@ -91,13 +89,14 @@ class AutoTrader(BaseAutoTrader):
             f"received hedge filled for order {client_order_id} with average price {price} and volume {volume}"
         )
 
-    def bollinger_bands(self, instrument: int):
-        prices = self.etf_prices if instrument == Instrument.ETF else self.future_prices
-
-        mean = np.mean(prices[-self.moving_window :])
-        std = np.std(prices[-self.moving_window :])
-
-        return mean + 2 * std, mean - 2 * std
+    def macd_bid_ask(self, df: pd.DataFrame, n_fast=12, n_slow=26, n_signal=9):
+        average = (df["bid"] + df["ask"]) / 2
+        ema_fast = average.ewm(span=n_fast, min_periods=n_fast).mean()
+        ema_slow = average.ewm(span=n_slow, min_periods=n_slow).mean()
+        macd = ema_fast - ema_slow
+        signal_line = macd.ewm(span=n_signal, min_periods=n_signal).mean()
+        histogram = macd - signal_line
+        return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
 
     def on_order_book_update_message(
         self,
@@ -116,25 +115,15 @@ class AutoTrader(BaseAutoTrader):
         price levels.
         """
         self.logger.info(
-            "received order book for instrument %d with sequence number %d",
-            instrument,
-            sequence_number,
+            f"received order book for instrument {instrument} with sequence number {sequence_number}"
         )
 
         if instrument == Instrument.ETF:
-            self.current_etf = (bid_prices[0] + ask_prices[0]) / 2
-            if self.current_future == 0:
-                return
+            new_row = pd.Series({"bid": bid_prices[0], "ask": ask_prices[0]})
+            self.df_etf = pd.concat([self.df_etf, new_row.to_frame().T])
 
-        elif instrument == Instrument.FUTURE:
-            self.current_future = (bid_prices[0] + ask_prices[0]) / 2
-            if self.current_etf == 0:
-                return
-
-        self.etf_prices.append(self.current_etf)
-        self.future_prices.append(self.current_future)
-        if len(self.etf_prices) >= self.moving_window:
-            upper, lower = self.bollinger_bands(instrument)
+        if len(self.df_etf) >= 26:
+            macd, _, _ = self.macd_bid_ask(self.df_etf)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
@@ -147,14 +136,9 @@ class AutoTrader(BaseAutoTrader):
                 self.ask_id = 0
                 return
 
-            price = (
-                self.current_etf
-                if instrument == Instrument.ETF
-                else self.current_future
-            )
-
             if (
-                price >= upper
+                macd < 0
+                and self.short_position_opened == False
                 and self.ask_id == 0
                 and new_ask_price != 0
                 and self.position > LOT_SIZE - POSITION_LIMIT
@@ -166,11 +150,13 @@ class AutoTrader(BaseAutoTrader):
                     Side.SELL,
                     new_ask_price,
                     LOT_SIZE,
-                    Lifespan.FILL_AND_KILL,
+                    Lifespan.GOOD_FOR_DAY,
                 )
                 self.asks.add(self.ask_id)
+
             elif (
-                price <= lower
+                macd > 0
+                and self.long_position_opened == False
                 and self.bid_id == 0
                 and new_bid_price != 0
                 and self.position < POSITION_LIMIT - LOT_SIZE
@@ -182,7 +168,7 @@ class AutoTrader(BaseAutoTrader):
                     Side.BUY,
                     new_bid_price,
                     LOT_SIZE,
-                    Lifespan.FILL_AND_KILL,
+                    Lifespan.GOOD_FOR_DAY,
                 )
                 self.bids.add(self.bid_id)
 
@@ -199,11 +185,15 @@ class AutoTrader(BaseAutoTrader):
             f"received order filled for order {client_order_id} with price {price} and volume {volume}"
         )
         if client_order_id in self.bids:
+            self.short_position_opened = False
+            self.long_position_opened = True
             self.position += volume
             self.send_hedge_order(
                 next(self.order_ids), Side.ASK, MIN_BID_NEAREST_TICK, volume
             )
         elif client_order_id in self.asks:
+            self.short_position_opened = True
+            self.long_position_opened = False
             self.position -= volume
             self.send_hedge_order(
                 next(self.order_ids), Side.BID, MAX_ASK_NEAREST_TICK, volume
