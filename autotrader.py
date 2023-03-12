@@ -121,62 +121,70 @@ class AutoTrader(BaseAutoTrader):
             sequence_number,
         )
 
-        price1, price2 = self.current_etf, self.current_future
-        if instrument == Instrument.FUTURE:
-            price1, price2 = price2, price1
+        if instrument == Instrument.ETF:
+            self.current_etf = (bid_prices[0] + ask_prices[0]) / 2
+            if self.current_future == 0:
+                return
 
-        price1 = (bid_prices[0] + ask_prices[0]) / 2
-        if price2 == 0:
-            return
+        elif instrument == Instrument.FUTURE:
+            self.current_future = (bid_prices[0] + ask_prices[0]) / 2
+            if self.current_etf == 0:
+                return
 
         self.etf_prices.append(self.current_etf)
         self.future_prices.append(self.current_future)
-        if len(self.etf_prices) > self.moving_window:
+        if len(self.etf_prices) >= self.moving_window:
             upper, lower = self.bollinger_bands(instrument)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
                 self.send_cancel_order(self.bid_id)
                 self.bid_id = 0
+                return
 
             if self.ask_id != 0 and new_ask_price not in (self.ask_price, 0):
                 self.send_cancel_order(self.ask_id)
                 self.ask_id = 0
+                return
 
-            if instrument == Instrument.ETF:
-                if (
-                    self.current_etf <= lower
-                    and self.bid_id == 0
-                    and new_bid_price != 0
-                    and self.position < POSITION_LIMIT
-                ):
-                    self.bid_id = next(self.order_ids)
-                    self.bid_price = new_bid_price
-                    self.send_insert_order(
-                        self.bid_id,
-                        Side.BUY,
-                        new_bid_price,
-                        LOT_SIZE,
-                        Lifespan.FILL_AND_KILL,
-                    )
-                    self.bids.add(self.bid_id)
+            price = (
+                self.current_etf
+                if instrument == Instrument.ETF
+                else self.current_future
+            )
 
-                if (
-                    self.current_etf >= upper
-                    and self.ask_id == 0
-                    and new_ask_price != 0
-                    and self.position > -POSITION_LIMIT
-                ):
-                    self.ask_id = next(self.order_ids)
-                    self.ask_price = new_ask_price
-                    self.send_insert_order(
-                        self.ask_id,
-                        Side.SELL,
-                        new_ask_price,
-                        LOT_SIZE,
-                        Lifespan.FILL_AND_KILL,
-                    )
-                    self.asks.add(self.ask_id)
+            if (
+                price >= upper
+                and self.ask_id == 0
+                and new_ask_price != 0
+                and self.position > LOT_SIZE - POSITION_LIMIT
+            ):
+                self.ask_id = next(self.order_ids)
+                self.ask_price = new_ask_price
+                self.send_insert_order(
+                    self.ask_id,
+                    Side.SELL,
+                    new_ask_price,
+                    LOT_SIZE,
+                    Lifespan.FILL_AND_KILL,
+                )
+                self.asks.add(self.ask_id)
+            elif (
+                price <= lower
+                and self.bid_id == 0
+                and new_bid_price != 0
+                and self.position < POSITION_LIMIT - LOT_SIZE
+            ):
+                self.bid_id = next(self.order_ids)
+                self.bid_price = new_bid_price
+                self.send_insert_order(
+                    self.bid_id,
+                    Side.BUY,
+                    new_bid_price,
+                    LOT_SIZE,
+                    Lifespan.FILL_AND_KILL,
+                )
+                self.bids.add(self.bid_id)
 
     def on_order_filled_message(
         self, client_order_id: int, price: int, volume: int
