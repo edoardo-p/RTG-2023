@@ -19,6 +19,7 @@ import asyncio
 import itertools
 from typing import List
 
+import numpy as np
 import pandas as pd
 
 from ready_trader_go import (
@@ -40,13 +41,10 @@ MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
 
 class AutoTrader(BaseAutoTrader):
-    """Example Auto-trader.
-
-    When it starts this auto-trader places ten-lot bid and ask orders at the
-    current best-bid and best-ask prices respectively. Thereafter, if it has
-    a long position (it has bought more lots than it has sold) it reduces its
-    bid and ask prices. Conversely, if it has a short position (it has sold
-    more lots than it has bought) then it increases its bid and ask prices.
+    """
+    Implements the MACD Zero Crosses indicator with RSI filtering.+
+    When the MACD is greater than zero and the RSI is greater than 60%, we open a long position,
+    when the MACD is less than zero and the RSI is less than 40%, we open a short position.
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, team_name: str, secret: str):
@@ -69,7 +67,7 @@ class AutoTrader(BaseAutoTrader):
         will identify that order, otherwise the client_order_id will be zero.
         """
         self.logger.warning(
-            "error with order %d: %s", client_order_id, error_message.decode()
+            f"error with order {client_order_id}: {error_message.decode()}"
         )
         if client_order_id != 0 and (
             client_order_id in self.bids or client_order_id in self.asks
@@ -89,7 +87,7 @@ class AutoTrader(BaseAutoTrader):
             f"received hedge filled for order {client_order_id} with average price {price} and volume {volume}"
         )
 
-    def macd_bid_ask(self, df: pd.DataFrame, n_fast=12, n_slow=26, n_signal=9):
+    def macd(self, df: pd.DataFrame, n_fast=12, n_slow=26, n_signal=9):
         average = (df["bid"] + df["ask"]) / 2
         ema_fast = average.ewm(span=n_fast, min_periods=n_fast).mean()
         ema_slow = average.ewm(span=n_slow, min_periods=n_slow).mean()
@@ -97,6 +95,34 @@ class AutoTrader(BaseAutoTrader):
         signal_line = macd.ewm(span=n_signal, min_periods=n_signal).mean()
         histogram = macd - signal_line
         return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
+
+    def rsi(self, df: pd.DataFrame, n=14):
+        prices = (df["bid"] + df["ask"]) / 2
+        deltas = np.diff(prices)
+        seed = deltas[: n + 1]
+        up = seed[seed >= 0].sum() / n
+        down = -seed[seed < 0].sum() / n
+        rs = up / down
+        rsi = np.zeros_like(prices)
+        rsi[:n] = 100.0 - 100.0 / (1.0 + rs)
+
+        for i in range(n, len(prices)):
+            delta = deltas[i - 1]  # cause the diff is 1 shorter
+
+            if delta > 0:
+                upval = delta
+                downval = 0.0
+            else:
+                upval = 0.0
+                downval = -delta
+
+            up = (up * (n - 1) + upval) / n
+            down = (down * (n - 1) + downval) / n
+
+            rs = up / down
+            rsi[i] = 100.0 - 100.0 / (1.0 + rs)
+
+        return rsi[-1]
 
     def on_order_book_update_message(
         self,
@@ -123,7 +149,8 @@ class AutoTrader(BaseAutoTrader):
             self.df_etf = pd.concat([self.df_etf, new_row.to_frame().T])
 
         if len(self.df_etf) >= 26:
-            macd, _, _ = self.macd_bid_ask(self.df_etf)
+            macd, _, _ = self.macd(self.df_etf)
+            rsi = self.rsi(self.df_etf)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
@@ -138,6 +165,7 @@ class AutoTrader(BaseAutoTrader):
 
             if (
                 macd < 0
+                and rsi < 40
                 and self.short_position_opened == False
                 and self.ask_id == 0
                 and new_ask_price != 0
@@ -154,8 +182,9 @@ class AutoTrader(BaseAutoTrader):
                 )
                 self.asks.add(self.ask_id)
 
-            elif (
+            if (
                 macd > 0
+                and rsi > 60
                 and self.long_position_opened == False
                 and self.bid_id == 0
                 and new_bid_price != 0
