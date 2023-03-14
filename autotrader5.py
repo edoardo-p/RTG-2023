@@ -40,11 +40,12 @@ MIN_BID_NEAREST_TICK = (
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
 
-def ewma(arr: np.ndarray, window: int, alpha: float) -> np.ndarray:
-    w0 = np.full((window, window), 1 - alpha)
-    p = np.vstack([np.arange(i, i - window, -1) for i in range(window)])
-    w = np.tril(w0**p, 0)
-    return np.dot(w, arr[:: np.newaxis]) / w.sum(axis=1)
+def ewma(data, period, pippo):
+    alpha = 2 / (period + 1)
+    weights = (1 - alpha) ** np.arange(len(data), 0, -1)
+    weights /= weights.sum()
+    ema = np.dot(weights, data)
+    return ema[-1]
 
 
 def emas(
