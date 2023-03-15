@@ -38,17 +38,19 @@ MIN_BID_NEAREST_TICK = (
 )
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
-def stochastic(prices: np.ndarray) -> float:
-    hi, lo = max(prices), min(prices)
-    return (prices[-1] - lo) / (hi - lo)
+def stochastic(latest_asks: np.ndarray, latest_bids: np.ndarray) -> float:
+    hi, lo = max(latest_asks), min(latest_bids)
+    close = (latest_asks[0] + latest_bids[0]) / 2
+    return (close - lo) / (hi - lo) if hi - lo != 0 else 0.5
 
 def add_trade(prices: np.ndarray, trade_price: int) -> np.ndarray:
-    prices = np.roll(prices, -1)
-    prices[-1] = trade_price
+    prices = np.roll(prices, 1)
+    prices[0] = trade_price
     return prices
 
 class AutoTrader(BaseAutoTrader):
     """
+    Implemented a stochastic autotrader.
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, team_name: str, secret: str):
@@ -60,10 +62,9 @@ class AutoTrader(BaseAutoTrader):
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
 
         self.max_window = 14
-        self.etf_prices = np.zeros(self.max_window)
-
-        self.long_position_opened = False
-        self.short_position_opened = False
+        self.latest_asks = np.zeros(self.max_window)
+        self.latest_bids = np.zeros(self.max_window)
+        self.overbought = self.oversold = False
 
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
@@ -113,10 +114,11 @@ class AutoTrader(BaseAutoTrader):
         )
 
         if instrument == Instrument.ETF:
-            self.etf_prices = add_trade(self.etf_prices, (bid_prices[0] + ask_prices[0] / 2))
+            self.latest_asks = add_trade(self.latest_asks, ask_prices[0])
+            self.latest_bids = add_trade(self.latest_bids, bid_prices[0])
 
-        if len(self.etf_prices) >= self.max_window:
-            k = stochastic(self.etf_prices)
+        if len(self.latest_asks) >= self.max_window:
+            k = stochastic(self.latest_asks, self.latest_bids)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
@@ -130,8 +132,7 @@ class AutoTrader(BaseAutoTrader):
                 return
 
             if (
-                k > 0.8
-                and self.short_position_opened == False
+                k < 0.2
                 and self.ask_id == 0
                 and new_ask_price != 0
                 and self.position > LOT_SIZE - POSITION_LIMIT
@@ -148,8 +149,7 @@ class AutoTrader(BaseAutoTrader):
                 self.asks.add(self.ask_id)
 
             elif (
-                k < 0.2
-                and self.long_position_opened == False
+                k > 0.8
                 and self.bid_id == 0
                 and new_bid_price != 0
                 and self.position < POSITION_LIMIT - LOT_SIZE
@@ -178,15 +178,11 @@ class AutoTrader(BaseAutoTrader):
             f"received order filled for order {client_order_id} with price {price} and volume {volume}"
         )
         if client_order_id in self.bids:
-            self.short_position_opened = False
-            self.long_position_opened = True
             self.position += volume
             self.send_hedge_order(
                 next(self.order_ids), Side.ASK, MIN_BID_NEAREST_TICK, volume
             )
         elif client_order_id in self.asks:
-            self.short_position_opened = True
-            self.long_position_opened = False
             self.position -= volume
             self.send_hedge_order(
                 next(self.order_ids), Side.BID, MAX_ASK_NEAREST_TICK, volume
