@@ -131,8 +131,10 @@ class AutoTrader(BaseAutoTrader):
                 self.ask_id = 0
                 return
 
+            # Oversold trend
             if (
-                k < 0.2
+                k > 0.2
+                and self.oversold
                 and self.ask_id == 0
                 and new_ask_price != 0
                 and self.position > LOT_SIZE - POSITION_LIMIT
@@ -147,9 +149,10 @@ class AutoTrader(BaseAutoTrader):
                     Lifespan.GOOD_FOR_DAY,
                 )
                 self.asks.add(self.ask_id)
-
+            # Overbought trend
             elif (
-                k > 0.8
+                k < 0.8
+                and self.overbought
                 and self.bid_id == 0
                 and new_bid_price != 0
                 and self.position < POSITION_LIMIT - LOT_SIZE
@@ -164,6 +167,14 @@ class AutoTrader(BaseAutoTrader):
                     Lifespan.GOOD_FOR_DAY,
                 )
                 self.bids.add(self.bid_id)
+        
+        # Update status
+        if k > 0.8:
+            self.overbought = True
+        elif k < 0.2:
+            self.oversold = True
+        elif 0.2 < k < 0.8:
+            self.overbought = self.oversold = False
 
     def on_order_filled_message(
         self, client_order_id: int, price: int, volume: int
