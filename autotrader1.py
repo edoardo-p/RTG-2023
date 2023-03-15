@@ -19,7 +19,7 @@ import asyncio
 import itertools
 from typing import List
 
-import pandas as pd
+import numpy as np
 
 from ready_trader_go import (
     MAXIMUM_ASK,
@@ -38,12 +38,17 @@ MIN_BID_NEAREST_TICK = (
 )
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
+def stochastic(prices: np.ndarray) -> float:
+    hi, lo = max(prices), min(prices)
+    return (prices[-1] - lo) / (hi - lo)
+
+def add_trade(prices: np.ndarray, trade_price: int) -> np.ndarray:
+    prices = np.roll(prices, -1)
+    prices[-1] = trade_price
+    return prices
 
 class AutoTrader(BaseAutoTrader):
     """
-    Implements the MACD Zero Crosses indicator strategy.
-    When the MACD is greater than zero, we open a long position,
-    when the MACD is less than zero, we open a short position.
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, team_name: str, secret: str):
@@ -54,7 +59,8 @@ class AutoTrader(BaseAutoTrader):
         self.asks = set()
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
 
-        self.df_etf = pd.DataFrame(columns=["bid", "ask"])
+        self.max_window = 14
+        self.etf_prices = np.zeros(self.max_window)
 
         self.long_position_opened = False
         self.short_position_opened = False
@@ -86,15 +92,6 @@ class AutoTrader(BaseAutoTrader):
             f"received hedge filled for order {client_order_id} with average price {price} and volume {volume}"
         )
 
-    def macd(self, df: pd.DataFrame, n_fast=12, n_slow=26, n_signal=9):
-        average = (df["bid"] + df["ask"]) / 2
-        ema_fast = average.ewm(span=n_fast, min_periods=n_fast).mean()
-        ema_slow = average.ewm(span=n_slow, min_periods=n_slow).mean()
-        macd = ema_fast - ema_slow
-        signal_line = macd.ewm(span=n_signal, min_periods=n_signal).mean()
-        histogram = macd - signal_line
-        return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
-
     def on_order_book_update_message(
         self,
         instrument: int,
@@ -116,11 +113,10 @@ class AutoTrader(BaseAutoTrader):
         )
 
         if instrument == Instrument.ETF:
-            new_row = pd.Series({"bid": bid_prices[0], "ask": ask_prices[0]})
-            self.df_etf = pd.concat([self.df_etf, new_row.to_frame().T])
+            self.etf_prices = add_trade(self.etf_prices, (bid_prices[0] + ask_prices[0] / 2))
 
-        if len(self.df_etf) >= 26:
-            macd, _, _ = self.macd(self.df_etf)
+        if len(self.etf_prices) >= self.max_window:
+            k = stochastic(self.etf_prices)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
@@ -134,7 +130,7 @@ class AutoTrader(BaseAutoTrader):
                 return
 
             if (
-                macd < 0
+                k > 0.8
                 and self.short_position_opened == False
                 and self.ask_id == 0
                 and new_ask_price != 0
@@ -152,7 +148,7 @@ class AutoTrader(BaseAutoTrader):
                 self.asks.add(self.ask_id)
 
             elif (
-                macd > 0
+                k < 0.2
                 and self.long_position_opened == False
                 and self.bid_id == 0
                 and new_bid_price != 0
