@@ -38,19 +38,26 @@ MIN_BID_NEAREST_TICK = (
 )
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
+def sma(arr: np.ndarray, window: int) -> float:
+    return np.mean(arr[-window:])
+
 def stochastic(latest_asks: np.ndarray, latest_bids: np.ndarray) -> float:
     hi, lo = max(latest_asks), min(latest_bids)
     close = (latest_asks[0] + latest_bids[0]) / 2
     return (close - lo) / (hi - lo) if hi - lo != 0 else 0.5
 
-def add_trade(prices: np.ndarray, trade_price: int) -> np.ndarray:
+def stochastic_slow(vals: np.ndarray) -> float:
+    return sma(vals, len(vals))
+
+def roll_in_value(prices: np.ndarray, trade_price: int) -> np.ndarray:
     prices = np.roll(prices, 1)
     prices[0] = trade_price
     return prices
 
 class AutoTrader(BaseAutoTrader):
     """
-    Implemented a stochastic autotrader.
+    Implements a stochastic oscillator autotrader with
+    crossover with the moving average signal.
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, team_name: str, secret: str):
@@ -64,11 +71,10 @@ class AutoTrader(BaseAutoTrader):
         self.max_window = 14
         self.latest_asks = np.zeros(self.max_window)
         self.latest_bids = np.zeros(self.max_window)
-        self.overbought = self.oversold = False
+        self.last_k = np.zeros(3)
 
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
-
         If the error pertains to a particular order, then the client_order_id
         will identify that order, otherwise the client_order_id will be zero.
         """
@@ -114,11 +120,14 @@ class AutoTrader(BaseAutoTrader):
         )
 
         if instrument == Instrument.ETF:
-            self.latest_asks = add_trade(self.latest_asks, ask_prices[0])
-            self.latest_bids = add_trade(self.latest_bids, bid_prices[0])
+            self.latest_asks = roll_in_value(self.latest_asks, ask_prices[0])
+            self.latest_bids = roll_in_value(self.latest_bids, bid_prices[0])
 
         if len(self.latest_asks) >= self.max_window:
             k = stochastic(self.latest_asks, self.latest_bids)
+            d = stochastic_slow(self.last_k)
+            print(k, d)
+            self.last_k = roll_in_value(self.last_k, k)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
@@ -133,8 +142,8 @@ class AutoTrader(BaseAutoTrader):
 
             # Oversold trend
             if (
-                k > 0.2
-                and self.oversold
+                k < 0.2
+                and k > d
                 and self.ask_id == 0
                 and new_ask_price != 0
                 and self.position > LOT_SIZE - POSITION_LIMIT
@@ -151,8 +160,8 @@ class AutoTrader(BaseAutoTrader):
                 self.asks.add(self.ask_id)
             # Overbought trend
             elif (
-                k < 0.8
-                and self.overbought
+                k > 0.8
+                and k < d
                 and self.bid_id == 0
                 and new_bid_price != 0
                 and self.position < POSITION_LIMIT - LOT_SIZE
@@ -167,14 +176,6 @@ class AutoTrader(BaseAutoTrader):
                     Lifespan.GOOD_FOR_DAY,
                 )
                 self.bids.add(self.bid_id)
-        
-        # Update status
-        if k > 0.8:
-            self.overbought = True
-        elif k < 0.2:
-            self.oversold = True
-        elif 0.2 < k < 0.8:
-            self.overbought = self.oversold = False
 
     def on_order_filled_message(
         self, client_order_id: int, price: int, volume: int
