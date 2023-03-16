@@ -124,9 +124,9 @@ class AutoTrader(BaseAutoTrader):
             self.latest_bids = roll_in_value(self.latest_bids, bid_prices[0])
 
         if len(self.latest_asks) >= self.max_window:
-            k = stochastic(self.latest_asks, self.latest_bids)
+            k = stochastic(self.latest_asks, self.latest_bids) 
             d = stochastic_slow(self.last_k)
-            print(k, d)
+
             self.last_k = roll_in_value(self.last_k, k)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
@@ -146,7 +146,7 @@ class AutoTrader(BaseAutoTrader):
                 and k > d
                 and self.ask_id == 0
                 and new_ask_price != 0
-                and self.position > LOT_SIZE - POSITION_LIMIT
+                and self.position >= LOT_SIZE - POSITION_LIMIT
             ):
                 self.ask_id = next(self.order_ids)
                 self.ask_price = new_ask_price
@@ -164,7 +164,7 @@ class AutoTrader(BaseAutoTrader):
                 and k < d
                 and self.bid_id == 0
                 and new_bid_price != 0
-                and self.position < POSITION_LIMIT - LOT_SIZE
+                and self.position <= POSITION_LIMIT - LOT_SIZE
             ):
                 self.bid_id = next(self.order_ids)
                 self.bid_price = new_bid_price
