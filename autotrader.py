@@ -19,6 +19,9 @@ import asyncio
 import itertools
 from typing import List
 
+import numpy as np
+import pandas as pd
+
 from ready_trader_go import (
     MAXIMUM_ASK,
     MINIMUM_BID,
@@ -36,8 +39,124 @@ MIN_BID_NEAREST_TICK = (
 )
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
-def calc_vwap(bid: int, ask: int, bid_vol: int, ask_vol: int) -> float:
-    return (bid * ask_vol + ask * bid_vol) / (bid_vol + ask_vol)
+
+def calc_ema(df, period, alpha=False):
+
+    con = pd.concat(
+        [df[:period]["TR"].rolling(window=period).mean(), df[period:]["TR"]]
+    )
+
+    if alpha == True:
+        # (1 - alpha) * previous_val + alpha * current_val where alpha = 1 / period
+        alpha = 1 / period
+        target = con.ewm(alpha, adjust=False).mean()
+    else:
+        # ((current_val - previous_val) * coeff) + previous_val where coeff = 2 / (period + 1)
+        target = con.ewm(span=period, adjust=False).mean()
+
+    target.fillna(0, inplace=True)
+    return target
+
+
+def calc_atr(df, period):
+    # Compute true range only if it is not computed and stored earlier in the df
+    df["h-l"] = df["High"] - df["Low"]
+    df["h-yc"] = abs(df["High"] - df["Close"].shift())
+    df["l-yc"] = abs(df["Low"] - df["Close"].shift())
+
+    df["TR"] = df[["h-l", "h-yc", "l-yc"]].max(axis=1)
+
+    df.drop(["h-l", "h-yc", "l-yc"], inplace=True, axis=1)
+
+    # Compute EMA of true range using ATR formula after ignoring first row
+    df["ATR"] = calc_ema(df, period, alpha=True)
+
+    return df
+
+
+def calc_supertrend(df, period, multiplier):
+
+    calc_atr(df, period)
+    atr = f"ATR_{period}"
+    st = f"ST_{period}_{multiplier}"
+    stx = f"STX_{period}_{multiplier}"
+
+    """
+    SuperTrend Algorithm :
+    
+        BASIC UPPERBAND = (HIGH + LOW) / 2 + Multiplier * ATR
+        BASIC LOWERBAND = (HIGH + LOW) / 2 - Multiplier * ATR
+        
+        FINAL UPPERBAND = IF( (Current BASICUPPERBAND < Previous FINAL UPPERBAND) or (Previous Close > Previous FINAL UPPERBAND))
+                            THEN (Current BASIC UPPERBAND) ELSE Previous FINALUPPERBAND)
+        FINAL LOWERBAND = IF( (Current BASIC LOWERBAND > Previous FINAL LOWERBAND) or (Previous Close < Previous FINAL LOWERBAND)) 
+                            THEN (Current BASIC LOWERBAND) ELSE Previous FINAL LOWERBAND)
+        
+        SUPERTREND = IF((Previous SUPERTREND = Previous FINAL UPPERBAND) and (Current Close <= Current FINAL UPPERBAND)) THEN
+                        Current FINAL UPPERBAND
+                    ELSE
+                        IF((Previous SUPERTREND = Previous FINAL UPPERBAND) and (Current Close > Current FINAL UPPERBAND)) THEN
+                            Current FINAL LOWERBAND
+                        ELSE
+                            IF((Previous SUPERTREND = Previous FINAL LOWERBAND) and (Current Close >= Current FINAL LOWERBAND)) THEN
+                                Current FINAL LOWERBAND
+                            ELSE
+                                IF((Previous SUPERTREND = Previous FINAL LOWERBAND) and (Current Close < Current FINAL LOWERBAND)) THEN
+                                    Current FINAL UPPERBAND
+    """
+
+    # Compute basic upper and lower bands
+    df["basic_ub"] = (df["High"] + df["Low"]) / 2 + multiplier * df[atr]
+    df["basic_lb"] = (df["High"] + df["Low"]) / 2 - multiplier * df[atr]
+
+    # Compute final upper and lower bands
+    df["final_ub"] = 0.00
+    df["final_lb"] = 0.00
+    for i in range(period, len(df)):
+        df["final_ub"].iat[i] = (
+            df["basic_ub"].iat[i]
+            if df["basic_ub"].iat[i] < df["final_ub"].iat[i - 1]
+            or df["Close"].iat[i - 1] > df["final_ub"].iat[i - 1]
+            else df["final_ub"].iat[i - 1]
+        )
+        df["final_lb"].iat[i] = (
+            df["basic_lb"].iat[i]
+            if df["basic_lb"].iat[i] > df["final_lb"].iat[i - 1]
+            or df["Close"].iat[i - 1] < df["final_lb"].iat[i - 1]
+            else df["final_lb"].iat[i - 1]
+        )
+
+    # Set the Supertrend value
+    df[st] = 0.00
+    for i in range(period, len(df)):
+        df[st].iat[i] = (
+            df["final_ub"].iat[i]
+            if df[st].iat[i - 1] == df["final_ub"].iat[i - 1]
+            and df["Close"].iat[i] <= df["final_ub"].iat[i]
+            else df["final_lb"].iat[i]
+            if df[st].iat[i - 1] == df["final_ub"].iat[i - 1]
+            and df["Close"].iat[i] > df["final_ub"].iat[i]
+            else df["final_lb"].iat[i]
+            if df[st].iat[i - 1] == df["final_lb"].iat[i - 1]
+            and df["Close"].iat[i] >= df["final_lb"].iat[i]
+            else df["final_ub"].iat[i]
+            if df[st].iat[i - 1] == df["final_lb"].iat[i - 1]
+            and df["Close"].iat[i] < df["final_lb"].iat[i]
+            else 0.00
+        )
+
+    # Mark the trend direction up/down
+    df[stx] = np.where(
+        (df[st] > 0.00), np.where((df["Close"] < df[st]), "down", "up"), np.NaN
+    )
+
+    # Remove basic and final bands from the columns
+    df.drop(["basic_ub", "basic_lb", "final_ub", "final_lb"], inplace=True, axis=1)
+
+    df.fillna(0, inplace=True)
+
+    return df
+
 
 class AutoTrader(BaseAutoTrader):
     """Example Auto-trader.
@@ -84,7 +203,7 @@ class AutoTrader(BaseAutoTrader):
             "received hedge filled for order %d with average price %d and volume %d",
             client_order_id,
             price,
-            volume
+            volume,
         )
 
     def on_order_book_update_message(
@@ -108,9 +227,9 @@ class AutoTrader(BaseAutoTrader):
             instrument,
             sequence_number,
         )
-        
-        if (bid_volumes[0] | ask_volumes[0] == 0): return
-        vwap = calc_vwap(bid_prices[0], ask_prices[0], bid_volumes[0], ask_volumes[0])
+
+        if bid_volumes[0] | ask_volumes[0] == 0:
+            return
         new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
         if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
@@ -122,10 +241,9 @@ class AutoTrader(BaseAutoTrader):
             self.ask_id = 0
 
         if (
-            new_ask_price > vwap
-            and self.ask_id == 0
+            self.ask_id == 0
             and new_ask_price != 0
-            and self.position > LOT_SIZE-POSITION_LIMIT
+            and self.position > LOT_SIZE - POSITION_LIMIT
         ):
             self.ask_id = next(self.order_ids)
             self.ask_price = new_ask_price
@@ -139,8 +257,7 @@ class AutoTrader(BaseAutoTrader):
             self.asks.add(self.ask_id)
 
         elif (
-            new_bid_price < vwap
-            and self.bid_id == 0
+            self.bid_id == 0
             and new_bid_price != 0
             and self.position < POSITION_LIMIT - LOT_SIZE
         ):
@@ -168,7 +285,7 @@ class AutoTrader(BaseAutoTrader):
             "received order filled for order %d with price %d and volume %d",
             client_order_id,
             price,
-            volume
+            volume,
         )
         if client_order_id in self.bids:
             self.position += volume
@@ -198,7 +315,7 @@ class AutoTrader(BaseAutoTrader):
             client_order_id,
             fill_volume,
             remaining_volume,
-            fees
+            fees,
         )
         if remaining_volume == 0:
             if client_order_id == self.bid_id:
@@ -229,5 +346,5 @@ class AutoTrader(BaseAutoTrader):
         self.logger.info(
             "received trade ticks for instrument %d with sequence number %d",
             instrument,
-            sequence_number
+            sequence_number,
         )
