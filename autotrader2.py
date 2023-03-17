@@ -38,21 +38,26 @@ MIN_BID_NEAREST_TICK = (
 )
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
+
 def sma(arr: np.ndarray, window: int) -> float:
     return np.mean(arr[-window:])
+
 
 def stochastic(latest_asks: np.ndarray, latest_bids: np.ndarray) -> float:
     hi, lo = max(latest_asks), min(latest_bids)
     close = (latest_asks[0] + latest_bids[0]) / 2
     return (close - lo) / (hi - lo) if hi - lo != 0 else 0.5
 
+
 def stochastic_slow(vals: np.ndarray) -> float:
     return sma(vals, len(vals))
+
 
 def roll_in_value(prices: np.ndarray, trade_price: int) -> np.ndarray:
     prices = np.roll(prices, 1)
     prices[0] = trade_price
     return prices
+
 
 class AutoTrader(BaseAutoTrader):
     """
@@ -124,7 +129,7 @@ class AutoTrader(BaseAutoTrader):
             self.latest_bids = roll_in_value(self.latest_bids, bid_prices[0])
 
         if len(self.latest_asks) >= self.max_window:
-            k = stochastic(self.latest_asks, self.latest_bids) 
+            k = stochastic(self.latest_asks, self.latest_bids)
             d = stochastic_slow(self.last_k)
 
             self.last_k = roll_in_value(self.last_k, k)
