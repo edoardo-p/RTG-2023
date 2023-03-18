@@ -17,10 +17,10 @@
 #     <https://www.gnu.org/licenses/>.
 import asyncio
 import itertools
+import math
 from typing import List
 
 import numpy as np
-import scipy
 
 from ready_trader_go import (
     MAXIMUM_ASK,
@@ -40,14 +40,21 @@ MIN_BID_NEAREST_TICK = (
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
 
-class AutoTrader(BaseAutoTrader):
-    """Example Auto-trader.
+def roll_in_value(array: np.ndarray, value: float) -> np.ndarray:
+    array = np.roll(array, 1)
+    array[0] = value
+    return array
 
-    When it starts this auto-trader places ten-lot bid and ask orders at the
-    current best-bid and best-ask prices respectively. Thereafter, if it has
-    a long position (it has bought more lots than it has sold) it reduces its
-    bid and ask prices. Conversely, if it has a short position (it has sold
-    more lots than it has bought) then it increases its bid and ask prices.
+
+def volatility_offset(prices) -> int:
+    diffs = np.diff(prices)
+    offset = np.multiply(diffs, diffs).mean()
+    return offset // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
+
+
+class AutoTrader(BaseAutoTrader):
+    """
+    Volatitilty-offset market maker
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, team_name: str, secret: str):
@@ -58,11 +65,8 @@ class AutoTrader(BaseAutoTrader):
         self.asks = set()
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
 
-        self.moving_window = 20
-        self.etf_prices = []
-        self.future_prices = []
-        self.current_etf = 0
-        self.current_future = 0
+        self.window = 10
+        self.latest_prices = np.zeros(self.window)
 
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
@@ -88,16 +92,11 @@ class AutoTrader(BaseAutoTrader):
         the number of lots filled at that price.
         """
         self.logger.info(
-            f"received hedge filled for order {client_order_id} with average price {price} and volume {volume}"
+            "received hedge filled for order %d with average price %d and volume %d",
+            client_order_id,
+            price,
+            volume,
         )
-
-    def bollinger_bands(self, instrument: int):
-        prices = self.etf_prices if instrument == Instrument.ETF else self.future_prices
-
-        mean = np.mean(prices[-self.moving_window :])
-        std = np.std(prices[-self.moving_window :])
-
-        return mean + 2 * std, mean - 2 * std
 
     def on_order_book_update_message(
         self,
@@ -120,60 +119,25 @@ class AutoTrader(BaseAutoTrader):
             instrument,
             sequence_number,
         )
-
         if instrument == Instrument.ETF:
-            self.current_etf = (bid_prices[0] + ask_prices[0]) / 2
-            if self.current_future == 0:
-                return
-
-        elif instrument == Instrument.FUTURE:
-            self.current_future = (bid_prices[0] + ask_prices[0]) / 2
-            if self.current_etf == 0:
-                return
-
-        self.etf_prices.append(self.current_etf)
-        self.future_prices.append(self.current_future)
-        if len(self.etf_prices) >= self.moving_window:
-            upper, lower = self.bollinger_bands(instrument)
-            new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
+            self.latest_prices = roll_in_value(
+                self.latest_prices, (bid_prices[0] + ask_prices[0]) / 2
+            )
+            offset = volatility_offset(self.latest_prices)
+            new_bid_price = bid_prices[0] + offset if bid_prices[0] != 0 else 0
+            new_ask_price = ask_prices[0] + offset if ask_prices[0] != 0 else 0
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
                 self.send_cancel_order(self.bid_id)
                 self.bid_id = 0
-                return
-
             if self.ask_id != 0 and new_ask_price not in (self.ask_price, 0):
                 self.send_cancel_order(self.ask_id)
                 self.ask_id = 0
-                return
-
-            price = (
-                self.current_etf
-                if instrument == Instrument.ETF
-                else self.current_future
-            )
 
             if (
-                price >= upper
-                and self.ask_id == 0
-                and new_ask_price != 0
-                and self.position > LOT_SIZE - POSITION_LIMIT
-            ):
-                self.ask_id = next(self.order_ids)
-                self.ask_price = new_ask_price
-                self.send_insert_order(
-                    self.ask_id,
-                    Side.SELL,
-                    new_ask_price,
-                    LOT_SIZE,
-                    Lifespan.FILL_AND_KILL,
-                )
-                self.asks.add(self.ask_id)
-            elif (
-                price <= lower
-                and self.bid_id == 0
+                self.bid_id == 0
                 and new_bid_price != 0
-                and self.position < POSITION_LIMIT - LOT_SIZE
+                and self.position < POSITION_LIMIT
             ):
                 self.bid_id = next(self.order_ids)
                 self.bid_price = new_bid_price
@@ -182,9 +146,25 @@ class AutoTrader(BaseAutoTrader):
                     Side.BUY,
                     new_bid_price,
                     LOT_SIZE,
-                    Lifespan.FILL_AND_KILL,
+                    Lifespan.GOOD_FOR_DAY,
                 )
                 self.bids.add(self.bid_id)
+
+            if (
+                self.ask_id == 0
+                and new_ask_price != 0
+                and self.position > -POSITION_LIMIT
+            ):
+                self.ask_id = next(self.order_ids)
+                self.ask_price = new_ask_price
+                self.send_insert_order(
+                    self.ask_id,
+                    Side.SELL,
+                    new_ask_price,
+                    LOT_SIZE,
+                    Lifespan.GOOD_FOR_DAY,
+                )
+                self.asks.add(self.ask_id)
 
     def on_order_filled_message(
         self, client_order_id: int, price: int, volume: int
@@ -196,7 +176,10 @@ class AutoTrader(BaseAutoTrader):
         the number of lots filled at that price.
         """
         self.logger.info(
-            f"received order filled for order {client_order_id} with price {price} and volume {volume}"
+            "received order filled for order %d with price %d and volume %d",
+            client_order_id,
+            price,
+            volume,
         )
         if client_order_id in self.bids:
             self.position += volume
@@ -222,15 +205,21 @@ class AutoTrader(BaseAutoTrader):
         If an order is cancelled its remaining volume will be zero.
         """
         self.logger.info(
-            f"received order status for order {client_order_id} with fill volume {fill_volume} remaining {remaining_volume} and fees {fees}"
+            "received order status for order %d with fill volume %d remaining %d and fees %d",
+            client_order_id,
+            fill_volume,
+            remaining_volume,
+            fees,
         )
         if remaining_volume == 0:
             if client_order_id == self.bid_id:
                 self.bid_id = 0
-                self.bids.discard(client_order_id)
             elif client_order_id == self.ask_id:
                 self.ask_id = 0
-                self.asks.discard(client_order_id)
+
+            # It could be either a bid or an ask
+            self.bids.discard(client_order_id)
+            self.asks.discard(client_order_id)
 
     def on_trade_ticks_message(
         self,
@@ -251,5 +240,7 @@ class AutoTrader(BaseAutoTrader):
         the end of both the prices and volumes arrays.
         """
         self.logger.info(
-            f"received trade ticks for instrument {instrument} with sequence number {sequence_number}"
+            "received trade ticks for instrument %d with sequence number %d",
+            instrument,
+            sequence_number,
         )
