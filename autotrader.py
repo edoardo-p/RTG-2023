@@ -40,19 +40,13 @@ MIN_BID_NEAREST_TICK = (
 MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
 
-def calc_ema(df, period, alpha=False):
+def calc_ema(df, period):
 
-    con = pd.concat(
-        [df[:period]["TR"].rolling(window=period).mean(), df[period:]["TR"]]
-    )
+    con = pd.concat([df[:period].rolling(window=period).mean(), df[period:]])
 
-    if alpha == True:
-        # (1 - alpha) * previous_val + alpha * current_val where alpha = 1 / period
-        alpha = 1 / period
-        target = con.ewm(alpha, adjust=False).mean()
-    else:
-        # ((current_val - previous_val) * coeff) + previous_val where coeff = 2 / (period + 1)
-        target = con.ewm(span=period, adjust=False).mean()
+    # (1 - alpha) * previous_val + alpha * current_val where alpha = 1 / period
+    alpha = 1 / period
+    target = con.ewm(alpha, adjust=False).mean()
 
     target.fillna(0, inplace=True)
     return target
@@ -69,18 +63,14 @@ def calc_atr(df, period):
     df.drop(["h-l", "h-yc", "l-yc"], inplace=True, axis=1)
 
     # Compute EMA of true range using ATR formula after ignoring first row
-    df["ATR"] = calc_ema(df, period, alpha=True)
+    df["ATR"] = calc_ema(df["TR"], period)
 
     return df
 
 
 def calc_supertrend(df, period, multiplier):
 
-    calc_atr(df, period)
-    atr = f"ATR_{period}"
-    st = f"ST_{period}_{multiplier}"
-    stx = f"STX_{period}_{multiplier}"
-
+    df = calc_atr(df, period)
     """
     SuperTrend Algorithm :
     
@@ -106,8 +96,8 @@ def calc_supertrend(df, period, multiplier):
     """
 
     # Compute basic upper and lower bands
-    df["basic_ub"] = (df["High"] + df["Low"]) / 2 + multiplier * df[atr]
-    df["basic_lb"] = (df["High"] + df["Low"]) / 2 - multiplier * df[atr]
+    df["basic_ub"] = (df["High"] + df["Low"]) / 2 + multiplier * df["ATR"]
+    df["basic_lb"] = (df["High"] + df["Low"]) / 2 - multiplier * df["ATR"]
 
     # Compute final upper and lower bands
     df["final_ub"] = 0.00
@@ -127,27 +117,27 @@ def calc_supertrend(df, period, multiplier):
         )
 
     # Set the Supertrend value
-    df[st] = 0.00
+    df["ST"] = 0.00
     for i in range(period, len(df)):
-        df[st].iat[i] = (
+        df["ST"].iat[i] = (
             df["final_ub"].iat[i]
-            if df[st].iat[i - 1] == df["final_ub"].iat[i - 1]
+            if df["ST"].iat[i - 1] == df["final_ub"].iat[i - 1]
             and df["Close"].iat[i] <= df["final_ub"].iat[i]
             else df["final_lb"].iat[i]
-            if df[st].iat[i - 1] == df["final_ub"].iat[i - 1]
+            if df["ST"].iat[i - 1] == df["final_ub"].iat[i - 1]
             and df["Close"].iat[i] > df["final_ub"].iat[i]
             else df["final_lb"].iat[i]
-            if df[st].iat[i - 1] == df["final_lb"].iat[i - 1]
+            if df["ST"].iat[i - 1] == df["final_lb"].iat[i - 1]
             and df["Close"].iat[i] >= df["final_lb"].iat[i]
             else df["final_ub"].iat[i]
-            if df[st].iat[i - 1] == df["final_lb"].iat[i - 1]
+            if df["ST"].iat[i - 1] == df["final_lb"].iat[i - 1]
             and df["Close"].iat[i] < df["final_lb"].iat[i]
             else 0.00
         )
 
     # Mark the trend direction up/down
-    df[stx] = np.where(
-        (df[st] > 0.00), np.where((df["Close"] < df[st]), "down", "up"), np.NaN
+    df["STX"] = np.where(
+        (df["ST"] > 0.00), np.where((df["Close"] < df["ST"]), "down", "up"), np.NaN
     )
 
     # Remove basic and final bands from the columns
@@ -156,6 +146,11 @@ def calc_supertrend(df, period, multiplier):
     df.fillna(0, inplace=True)
 
     return df
+
+
+def add_row(df: pd.DataFrame, row: pd.Series) -> pd.DataFrame:
+    new_df = pd.concat([df, row.to_frame().T], axis=0, ignore_index=True)
+    return new_df
 
 
 class AutoTrader(BaseAutoTrader):
@@ -175,6 +170,9 @@ class AutoTrader(BaseAutoTrader):
         self.bids = set()
         self.asks = set()
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
+
+        self.etf_prices = pd.DataFrame(columns=["High", "Low", "Close"])
+        self.dir = ""
 
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
@@ -227,50 +225,66 @@ class AutoTrader(BaseAutoTrader):
             instrument,
             sequence_number,
         )
-
-        if bid_volumes[0] | ask_volumes[0] == 0:
-            return
-        new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
-
-        if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
-            self.send_cancel_order(self.bid_id)
-            self.bid_id = 0
-
-        if self.ask_id != 0 and new_ask_price not in (self.ask_price, 0):
-            self.send_cancel_order(self.ask_id)
-            self.ask_id = 0
-
-        if (
-            self.ask_id == 0
-            and new_ask_price != 0
-            and self.position > LOT_SIZE - POSITION_LIMIT
-        ):
-            self.ask_id = next(self.order_ids)
-            self.ask_price = new_ask_price
-            self.send_insert_order(
-                self.ask_id,
-                Side.SELL,
-                new_ask_price,
-                LOT_SIZE,
-                Lifespan.FILL_AND_KILL,
+        if instrument == Instrument.ETF:
+            row = pd.Series(
+                {
+                    "High": ask_prices[0],
+                    "Low": bid_prices[0],
+                    "Close": (ask_prices[0] + bid_prices[0]) // 2,
+                }
             )
-            self.asks.add(self.ask_id)
+            self.etf_prices = add_row(self.etf_prices, row)
+            trend = calc_supertrend(self.etf_prices, 10, 3)
 
-        elif (
-            self.bid_id == 0
-            and new_bid_price != 0
-            and self.position < POSITION_LIMIT - LOT_SIZE
-        ):
-            self.bid_id = next(self.order_ids)
-            self.bid_price = new_bid_price
-            self.send_insert_order(
-                self.bid_id,
-                Side.BUY,
-                new_bid_price,
-                LOT_SIZE,
-                Lifespan.FILL_AND_KILL,
-            )
-            self.bids.add(self.bid_id)
+            if bid_volumes[0] | ask_volumes[0] == 0:
+                return
+            new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
+
+            if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
+                self.send_cancel_order(self.bid_id)
+                self.bid_id = 0
+
+            if self.ask_id != 0 and new_ask_price not in (self.ask_price, 0):
+                self.send_cancel_order(self.ask_id)
+                self.ask_id = 0
+
+            if (
+                self.dir != trend["STX"].iloc[-1]
+                and self.dir != "down"
+                and self.ask_id == 0
+                and new_ask_price != 0
+                and self.position > LOT_SIZE - POSITION_LIMIT
+            ):
+                self.ask_id = next(self.order_ids)
+                self.ask_price = new_ask_price
+                self.send_insert_order(
+                    self.ask_id,
+                    Side.SELL,
+                    new_ask_price,
+                    LOT_SIZE,
+                    Lifespan.GOOD_FOR_DAY,
+                )
+                self.asks.add(self.ask_id)
+
+            if (
+                self.dir != trend["STX"].iloc[-1]
+                and self.dir != "up"
+                and self.bid_id == 0
+                and new_bid_price != 0
+                and self.position < POSITION_LIMIT - LOT_SIZE
+            ):
+                self.bid_id = next(self.order_ids)
+                self.bid_price = new_bid_price
+                self.send_insert_order(
+                    self.bid_id,
+                    Side.BUY,
+                    new_bid_price,
+                    LOT_SIZE,
+                    Lifespan.GOOD_FOR_DAY,
+                )
+                self.bids.add(self.bid_id)
+
+            self.dir = trend["STX"].iloc[-1]
 
     def on_order_filled_message(
         self, client_order_id: int, price: int, volume: int
@@ -289,14 +303,10 @@ class AutoTrader(BaseAutoTrader):
         )
         if client_order_id in self.bids:
             self.position += volume
-            self.send_hedge_order(
-                next(self.order_ids), Side.ASK, MIN_BID_NEAREST_TICK, volume
-            )
+            self.send_hedge_order(next(self.order_ids), Side.ASK, price, volume)
         elif client_order_id in self.asks:
             self.position -= volume
-            self.send_hedge_order(
-                next(self.order_ids), Side.BID, MAX_ASK_NEAREST_TICK, volume
-            )
+            self.send_hedge_order(next(self.order_ids), Side.BID, price, volume)
 
     def on_order_status_message(
         self, client_order_id: int, fill_volume: int, remaining_volume: int, fees: int

@@ -37,6 +37,6 @@
   },
   "Traders": {
     "Basic": "1234",
-    "VWAP": "secret"
+    "Supertrend": "secret"
   }
 }
