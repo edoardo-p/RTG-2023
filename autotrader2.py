@@ -28,6 +28,17 @@ POSITION_LIMIT = 100
 TICK_SIZE_IN_CENTS = 100
 
 
+def calc_macd(
+    df: pd.DataFrame, n_fast=12, n_slow=26, n_signal=9
+) -> tuple[float, float]:
+    average = (df["bid"] + df["ask"]) / 2
+    ema_fast = average.ewm(span=n_fast, min_periods=n_fast).mean()
+    ema_slow = average.ewm(span=n_slow, min_periods=n_slow).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=n_signal, min_periods=n_signal).mean()
+    return macd.iloc[-1], signal_line.iloc[-1]
+
+
 class AutoTrader(BaseAutoTrader):
     """
     Implements the MACD Crossover indicator strategy.
@@ -75,15 +86,6 @@ class AutoTrader(BaseAutoTrader):
             f"received hedge filled for order {client_order_id} with average price {price} and volume {volume}"
         )
 
-    def macd(self, df: pd.DataFrame, n_fast=12, n_slow=26, n_signal=9):
-        average = (df["bid"] + df["ask"]) / 2
-        ema_fast = average.ewm(span=n_fast, min_periods=n_fast).mean()
-        ema_slow = average.ewm(span=n_slow, min_periods=n_slow).mean()
-        macd = ema_fast - ema_slow
-        signal_line = macd.ewm(span=n_signal, min_periods=n_signal).mean()
-        histogram = macd - signal_line
-        return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
-
     def on_order_book_update_message(
         self,
         instrument: int,
@@ -109,7 +111,7 @@ class AutoTrader(BaseAutoTrader):
             self.df_etf = pd.concat([self.df_etf, new_row.to_frame().T])
 
         if len(self.df_etf) >= 26:
-            macd, signal_line, _ = self.macd(self.df_etf)
+            macd, signal_line = calc_macd(self.df_etf)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
