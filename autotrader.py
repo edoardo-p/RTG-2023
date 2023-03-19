@@ -19,25 +19,16 @@ import asyncio
 import itertools
 from typing import List
 
-from ready_trader_go import (
-    MAXIMUM_ASK,
-    MINIMUM_BID,
-    BaseAutoTrader,
-    Instrument,
-    Lifespan,
-    Side,
-)
+from ready_trader_go import BaseAutoTrader, Instrument, Lifespan, Side
 
 LOT_SIZE = 10
 POSITION_LIMIT = 100
 TICK_SIZE_IN_CENTS = 100
-MIN_BID_NEAREST_TICK = (
-    (MINIMUM_BID + TICK_SIZE_IN_CENTS) // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
-)
-MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
+
 
 def calc_vwap(bid: int, ask: int, bid_vol: int, ask_vol: int) -> float:
     return (bid * ask_vol + ask * bid_vol) / (bid_vol + ask_vol)
+
 
 class AutoTrader(BaseAutoTrader):
     """Example Auto-trader.
@@ -84,7 +75,7 @@ class AutoTrader(BaseAutoTrader):
             "received hedge filled for order %d with average price %d and volume %d",
             client_order_id,
             price,
-            volume
+            volume,
         )
 
     def on_order_book_update_message(
@@ -108,52 +99,56 @@ class AutoTrader(BaseAutoTrader):
             instrument,
             sequence_number,
         )
-        
-        if (bid_volumes[0] | ask_volumes[0] == 0): return
-        vwap = calc_vwap(bid_prices[0], ask_prices[0], bid_volumes[0], ask_volumes[0])
-        new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
-        if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
-            self.send_cancel_order(self.bid_id)
-            self.bid_id = 0
-
-        if self.ask_id != 0 and new_ask_price not in (self.ask_price, 0):
-            self.send_cancel_order(self.ask_id)
-            self.ask_id = 0
-
-        if (
-            new_ask_price > vwap
-            and self.ask_id == 0
-            and new_ask_price != 0
-            and self.position > LOT_SIZE-POSITION_LIMIT
-        ):
-            self.ask_id = next(self.order_ids)
-            self.ask_price = new_ask_price
-            self.send_insert_order(
-                self.ask_id,
-                Side.SELL,
-                new_ask_price,
-                LOT_SIZE,
-                Lifespan.FILL_AND_KILL,
+        if instrument == Instrument.FUTURE:
+            if bid_volumes[0] | ask_volumes[0] == 0:
+                return
+            vwap = calc_vwap(
+                bid_prices[0], ask_prices[0], bid_volumes[0], ask_volumes[0]
             )
-            self.asks.add(self.ask_id)
+            new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
-        elif (
-            new_bid_price < vwap
-            and self.bid_id == 0
-            and new_bid_price != 0
-            and self.position < POSITION_LIMIT - LOT_SIZE
-        ):
-            self.bid_id = next(self.order_ids)
-            self.bid_price = new_bid_price
-            self.send_insert_order(
-                self.bid_id,
-                Side.BUY,
-                new_bid_price,
-                LOT_SIZE,
-                Lifespan.FILL_AND_KILL,
-            )
-            self.bids.add(self.bid_id)
+            if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
+                self.send_cancel_order(self.bid_id)
+                self.bid_id = 0
+
+            if self.ask_id != 0 and new_ask_price not in (self.ask_price, 0):
+                self.send_cancel_order(self.ask_id)
+                self.ask_id = 0
+
+            if (
+                new_ask_price > vwap
+                and self.ask_id == 0
+                and new_ask_price != 0
+                and self.position > LOT_SIZE - POSITION_LIMIT
+            ):
+                self.ask_id = next(self.order_ids)
+                self.ask_price = new_ask_price
+                self.send_insert_order(
+                    self.ask_id,
+                    Side.SELL,
+                    new_ask_price,
+                    LOT_SIZE,
+                    Lifespan.GOOD_FOR_DAY,
+                )
+                self.asks.add(self.ask_id)
+
+            elif (
+                new_bid_price < vwap
+                and self.bid_id == 0
+                and new_bid_price != 0
+                and self.position < POSITION_LIMIT - LOT_SIZE
+            ):
+                self.bid_id = next(self.order_ids)
+                self.bid_price = new_bid_price
+                self.send_insert_order(
+                    self.bid_id,
+                    Side.BUY,
+                    new_bid_price,
+                    LOT_SIZE,
+                    Lifespan.GOOD_FOR_DAY,
+                )
+                self.bids.add(self.bid_id)
 
     def on_order_filled_message(
         self, client_order_id: int, price: int, volume: int
@@ -168,18 +163,14 @@ class AutoTrader(BaseAutoTrader):
             "received order filled for order %d with price %d and volume %d",
             client_order_id,
             price,
-            volume
+            volume,
         )
         if client_order_id in self.bids:
             self.position += volume
-            self.send_hedge_order(
-                next(self.order_ids), Side.ASK, MIN_BID_NEAREST_TICK, volume
-            )
+            self.send_hedge_order(next(self.order_ids), Side.ASK, price, volume)
         elif client_order_id in self.asks:
             self.position -= volume
-            self.send_hedge_order(
-                next(self.order_ids), Side.BID, MAX_ASK_NEAREST_TICK, volume
-            )
+            self.send_hedge_order(next(self.order_ids), Side.BID, price, volume)
 
     def on_order_status_message(
         self, client_order_id: int, fill_volume: int, remaining_volume: int, fees: int
@@ -198,7 +189,7 @@ class AutoTrader(BaseAutoTrader):
             client_order_id,
             fill_volume,
             remaining_volume,
-            fees
+            fees,
         )
         if remaining_volume == 0:
             if client_order_id == self.bid_id:
@@ -229,5 +220,5 @@ class AutoTrader(BaseAutoTrader):
         self.logger.info(
             "received trade ticks for instrument %d with sequence number %d",
             instrument,
-            sequence_number
+            sequence_number,
         )
