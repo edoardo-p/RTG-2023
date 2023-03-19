@@ -22,22 +22,11 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from ready_trader_go import (
-    MAXIMUM_ASK,
-    MINIMUM_BID,
-    BaseAutoTrader,
-    Instrument,
-    Lifespan,
-    Side,
-)
+from ready_trader_go import BaseAutoTrader, Instrument, Lifespan, Side
 
 LOT_SIZE = 10
 POSITION_LIMIT = 100
 TICK_SIZE_IN_CENTS = 100
-MIN_BID_NEAREST_TICK = (
-    (MINIMUM_BID + TICK_SIZE_IN_CENTS) // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
-)
-MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
 
 def ewma(data, period, pippo):
@@ -271,7 +260,7 @@ class AutoTrader(BaseAutoTrader):
             if self.position >= LOT_SIZE:
                 self.long_position_opened = True
             # self.send_hedge_order(
-            #     next(self.order_ids), Side.ASK, MIN_BID_NEAREST_TICK, volume
+            #     next(self.order_ids), Side.ASK, price, volume
             # )
         elif client_order_id in self.asks:
             # self.short_position_opened = True
@@ -279,7 +268,7 @@ class AutoTrader(BaseAutoTrader):
             if self.position < 0:
                 self.long_position_opened = False
             # self.send_hedge_order(
-            #     next(self.order_ids), Side.BID, MAX_ASK_NEAREST_TICK, volume
+            #     next(self.order_ids), Side.BID, price, volume
             # )
 
     def on_order_status_message(
