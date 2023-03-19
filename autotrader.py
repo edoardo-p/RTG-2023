@@ -47,14 +47,20 @@ def roll_in_value(array: np.ndarray, value: float) -> np.ndarray:
 
 
 def volatility_offset(prices) -> int:
-    diffs = np.diff(prices)
+    diffs = np.diff(prices / 100)
     offset = np.multiply(diffs, diffs).mean()
-    return offset // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
+    return (int(offset) + TICK_SIZE_IN_CENTS) // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
+
+
+def find_bucket_limits(price: int, grid_size: int) -> tuple[int, int]:
+    lower = price - (price % grid_size)
+    upper = lower + grid_size
+    return lower, upper
 
 
 class AutoTrader(BaseAutoTrader):
     """
-    Volatitilty-offset market maker
+    Fixed-offset market maker
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop, team_name: str, secret: str):
@@ -65,8 +71,8 @@ class AutoTrader(BaseAutoTrader):
         self.asks = set()
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
 
-        self.window = 10
-        self.latest_prices = np.zeros(self.window)
+        self.grid_tick_size = 5 * TICK_SIZE_IN_CENTS
+        self.tick_offset = 1 * TICK_SIZE_IN_CENTS
 
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
@@ -120,12 +126,13 @@ class AutoTrader(BaseAutoTrader):
             sequence_number,
         )
         if instrument == Instrument.ETF:
-            self.latest_prices = roll_in_value(
-                self.latest_prices, (bid_prices[0] + ask_prices[0]) / 2
-            )
-            offset = volatility_offset(self.latest_prices)
-            new_bid_price = bid_prices[0] + offset if bid_prices[0] != 0 else 0
-            new_ask_price = ask_prices[0] + offset if ask_prices[0] != 0 else 0
+            market_price = (bid_prices[0] + ask_prices[0]) // 2
+            market_price = market_price // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
+            # self.latest_prices = roll_in_value(self.latest_prices, market_price)
+            # offset = volatility_offset(self.latest_prices)
+            offset = self.tick_offset
+            new_bid_price = market_price - offset if market_price != 0 else 0
+            new_ask_price = market_price + offset if market_price != 0 else 0
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):
                 self.send_cancel_order(self.bid_id)
@@ -135,9 +142,9 @@ class AutoTrader(BaseAutoTrader):
                 self.ask_id = 0
 
             if (
-                self.bid_id == 0
-                and new_bid_price != 0
-                and self.position < POSITION_LIMIT
+                new_bid_price != 0
+                and self.position < POSITION_LIMIT // 2
+                and len(self.bids) < 5
             ):
                 self.bid_id = next(self.order_ids)
                 self.bid_price = new_bid_price
@@ -149,11 +156,12 @@ class AutoTrader(BaseAutoTrader):
                     Lifespan.GOOD_FOR_DAY,
                 )
                 self.bids.add(self.bid_id)
+                print(self.bid_id, self.bid_price)
 
             if (
-                self.ask_id == 0
-                and new_ask_price != 0
-                and self.position > -POSITION_LIMIT
+                new_ask_price != 0
+                and self.position > -POSITION_LIMIT // 2
+                and len(self.asks) < 5
             ):
                 self.ask_id = next(self.order_ids)
                 self.ask_price = new_ask_price
@@ -165,6 +173,7 @@ class AutoTrader(BaseAutoTrader):
                     Lifespan.GOOD_FOR_DAY,
                 )
                 self.asks.add(self.ask_id)
+                print(self.bid_id, self.bid_price)
 
     def on_order_filled_message(
         self, client_order_id: int, price: int, volume: int
