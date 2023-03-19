@@ -37,6 +37,10 @@
   },
   "Traders": {
     "Basic": "1234",
+    "MACD Zero Crosses": "secret",
+    "MACD Crossover": "secret",
+    "MACD Combo": "secret",
+    "MACD Zero Cross + RSI": "secret",
     "MACD and EMA": "secret"
   }
 }
