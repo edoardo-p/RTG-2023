@@ -101,7 +101,7 @@ class AutoTrader(BaseAutoTrader):
         )
 
         if instrument == Instrument.FUTURE:
-            if bid_volumes[0] | ask_volumes[0] == 0:
+            if bid_volumes[0] | ask_volumes[0] == 0 or sequence_number < 5:
                 return
             vwap = calc_vwap(
                 bid_prices[0], ask_prices[0], bid_volumes[0], ask_volumes[0]
