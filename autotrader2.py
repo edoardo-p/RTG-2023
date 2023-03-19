@@ -21,26 +21,15 @@ from typing import List
 
 import numpy as np
 
-from ready_trader_go import (
-    MAXIMUM_ASK,
-    MINIMUM_BID,
-    BaseAutoTrader,
-    Instrument,
-    Lifespan,
-    Side,
-)
+from ready_trader_go import BaseAutoTrader, Instrument, Lifespan, Side
 
 LOT_SIZE = 10
 POSITION_LIMIT = 100
 TICK_SIZE_IN_CENTS = 100
-MIN_BID_NEAREST_TICK = (
-    (MINIMUM_BID + TICK_SIZE_IN_CENTS) // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
-)
-MAX_ASK_NEAREST_TICK = MAXIMUM_ASK // TICK_SIZE_IN_CENTS * TICK_SIZE_IN_CENTS
 
 
 def sma(arr: np.ndarray, window: int) -> float:
-    return np.mean(arr[-window:])
+    return arr[-window:].mean()
 
 
 def stochastic(latest_asks: np.ndarray, latest_bids: np.ndarray) -> float:
@@ -53,10 +42,10 @@ def stochastic_slow(vals: np.ndarray) -> float:
     return sma(vals, len(vals))
 
 
-def roll_in_value(prices: np.ndarray, trade_price: int) -> np.ndarray:
-    prices = np.roll(prices, 1)
-    prices[0] = trade_price
-    return prices
+def roll_in_value(array: np.ndarray, value: float) -> np.ndarray:
+    array = np.roll(array, 1)
+    array[0] = value
+    return array
 
 
 class AutoTrader(BaseAutoTrader):
@@ -196,14 +185,10 @@ class AutoTrader(BaseAutoTrader):
         )
         if client_order_id in self.bids:
             self.position += volume
-            self.send_hedge_order(
-                next(self.order_ids), Side.ASK, MIN_BID_NEAREST_TICK, volume
-            )
+            self.send_hedge_order(next(self.order_ids), Side.ASK, price, volume)
         elif client_order_id in self.asks:
             self.position -= volume
-            self.send_hedge_order(
-                next(self.order_ids), Side.BID, MAX_ASK_NEAREST_TICK, volume
-            )
+            self.send_hedge_order(next(self.order_ids), Side.BID, price, volume)
 
     def on_order_status_message(
         self, client_order_id: int, fill_volume: int, remaining_volume: int, fees: int
