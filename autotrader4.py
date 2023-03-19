@@ -29,9 +29,46 @@ POSITION_LIMIT = 100
 TICK_SIZE_IN_CENTS = 100
 
 
+def calc_macd(df: pd.DataFrame, n_fast=12, n_slow=26) -> float:
+    average = (df["bid"] + df["ask"]) / 2
+    ema_fast = average.ewm(span=n_fast, min_periods=n_fast).mean()
+    ema_slow = average.ewm(span=n_slow, min_periods=n_slow).mean()
+    macd = ema_fast - ema_slow
+    return macd.iloc[-1]
+
+
+def calc_rsi(df: pd.DataFrame, n=14) -> float:
+    prices = (df["bid"] + df["ask"]) / 2
+    deltas = np.diff(prices)
+    seed = deltas[: n + 1]
+    up = seed[seed >= 0].sum() / n
+    down = -seed[seed < 0].sum() / n
+    rs = up / down
+    rsi = np.zeros_like(prices)
+    rsi[:n] = 100.0 - 100.0 / (1.0 + rs)
+
+    for i in range(n, len(prices)):
+        delta = deltas[i - 1]  # cause the diff is 1 shorter
+
+        if delta > 0:
+            upval = delta
+            downval = 0.0
+        else:
+            upval = 0.0
+            downval = -delta
+
+        up = (up * (n - 1) + upval) / n
+        down = (down * (n - 1) + downval) / n
+
+        rs = up / down
+        rsi[i] = 100.0 - 100.0 / (1.0 + rs)
+
+    return rsi[-1]
+
+
 class AutoTrader(BaseAutoTrader):
     """
-    Implements the MACD Zero Crosses indicator with RSI filtering.+
+    Implements the MACD Zero Crosses indicator with RSI filtering.
     When the MACD is greater than zero and the RSI is greater than 60%, we open a long position,
     when the MACD is less than zero and the RSI is less than 40%, we open a short position.
     """
@@ -76,43 +113,6 @@ class AutoTrader(BaseAutoTrader):
             f"received hedge filled for order {client_order_id} with average price {price} and volume {volume}"
         )
 
-    def macd(self, df: pd.DataFrame, n_fast=12, n_slow=26, n_signal=9):
-        average = (df["bid"] + df["ask"]) / 2
-        ema_fast = average.ewm(span=n_fast, min_periods=n_fast).mean()
-        ema_slow = average.ewm(span=n_slow, min_periods=n_slow).mean()
-        macd = ema_fast - ema_slow
-        signal_line = macd.ewm(span=n_signal, min_periods=n_signal).mean()
-        histogram = macd - signal_line
-        return macd.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
-
-    def rsi(self, df: pd.DataFrame, n=14):
-        prices = (df["bid"] + df["ask"]) / 2
-        deltas = np.diff(prices)
-        seed = deltas[: n + 1]
-        up = seed[seed >= 0].sum() / n
-        down = -seed[seed < 0].sum() / n
-        rs = up / down
-        rsi = np.zeros_like(prices)
-        rsi[:n] = 100.0 - 100.0 / (1.0 + rs)
-
-        for i in range(n, len(prices)):
-            delta = deltas[i - 1]  # cause the diff is 1 shorter
-
-            if delta > 0:
-                upval = delta
-                downval = 0.0
-            else:
-                upval = 0.0
-                downval = -delta
-
-            up = (up * (n - 1) + upval) / n
-            down = (down * (n - 1) + downval) / n
-
-            rs = up / down
-            rsi[i] = 100.0 - 100.0 / (1.0 + rs)
-
-        return rsi[-1]
-
     def on_order_book_update_message(
         self,
         instrument: int,
@@ -138,8 +138,8 @@ class AutoTrader(BaseAutoTrader):
             self.df_etf = pd.concat([self.df_etf, new_row.to_frame().T])
 
         if len(self.df_etf) >= 26:
-            macd, _, _ = self.macd(self.df_etf)
-            rsi = self.rsi(self.df_etf)
+            macd = calc_macd(self.df_etf)
+            rsi = calc_rsi(self.df_etf)
             new_bid_price, new_ask_price = bid_prices[0], ask_prices[0]
 
             if self.bid_id != 0 and new_bid_price not in (self.bid_price, 0):

@@ -95,7 +95,7 @@ def rollover(arr: np.ndarray, new_val: float) -> np.ndarray:
 
 class AutoTrader(BaseAutoTrader):
     """
-    Implements the MACD Zero Crosses indicator with RSI filtering.+
+    Implements the MACD Zero Crosses indicator with RSI filtering.
     When the MACD is greater than zero and the RSI is greater than 60%, we open a long position,
     when the MACD is less than zero and the RSI is less than 40%, we open a short position.
     """
