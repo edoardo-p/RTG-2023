@@ -120,7 +120,7 @@ class AutoTrader(BaseAutoTrader):
                 new_ask_price > vwap
                 and self.ask_id == 0
                 and new_ask_price != 0
-                and self.position > LOT_SIZE - POSITION_LIMIT
+                and self.position > 2 * LOT_SIZE - POSITION_LIMIT
             ):
                 self.ask_id = next(self.order_ids)
                 self.ask_price = new_ask_price
@@ -133,11 +133,11 @@ class AutoTrader(BaseAutoTrader):
                 )
                 self.asks.add(self.ask_id)
 
-            elif (
+            if (
                 new_bid_price < vwap
                 and self.bid_id == 0
                 and new_bid_price != 0
-                and self.position < POSITION_LIMIT - LOT_SIZE
+                and self.position < POSITION_LIMIT - 2 * LOT_SIZE
             ):
                 self.bid_id = next(self.order_ids)
                 self.bid_price = new_bid_price
