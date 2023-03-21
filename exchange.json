@@ -38,7 +38,8 @@
   "Traders": {
     "Basic": "1234",
     "Stochastic oscillator": "secret",
-    "Stochastic crossover": "secret"
+    "Stochastic crossover": "secret",
+    "Bollinger": "secret",
     "VWAP": "secret"
   }
 }

@@ -47,20 +47,6 @@ class AutoTrader(BaseAutoTrader):
         self.asks = set()
         self.ask_id = self.ask_price = self.bid_id = self.bid_price = self.position = 0
 
-        self.movingAverage_ETF = 0
-        self.movingAverage_FUT = 0
-        
-        self.movingSD = 0
-        self.currentETF = 0
-        self.currentFUT = 0
-        self.currentRatio = 0
-        self.rollingPrices_ETF = list()
-        self.rollingPrices_FUT = list()
-        self.tick = 0
-        self.n = 20
-        self.BOLU = 0
-        self.BOLD = 0
-
     def on_error_message(self, client_order_id: int, error_message: bytes) -> None:
         """Called when the exchange detects an error.
         If the error pertains to a particular order, then the client_order_id
@@ -113,7 +99,7 @@ class AutoTrader(BaseAutoTrader):
         )
 
         if instrument == Instrument.FUTURE:
-            if bid_volumes[0] | ask_volumes[0] == 0 or sequence_number < 5:
+            if bid_volumes[0] | ask_volumes[0] == 0 or sequence_number < 10:
                 return
             vwap = calc_vwap(
                 bid_prices[0], ask_prices[0], bid_volumes[0], ask_volumes[0]
